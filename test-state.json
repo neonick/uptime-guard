@@ -1,1 +1,1 @@
-{"checks": {"target-1": "ok", "target-2": "ok"}, "completed_at": "2026-10-12T20:18:13.362779+00:00", "delivery_ok": false, "schema": 1, "status": "ok", "targets": {"target-1": {"pending": []}, "target-2": {"pending": [{"at": "2026-10-12T20:18:13.362779+00:00", "channels": [], "id": "2026-10-12T20:14:25.992326+00:00", "kind": "recovery", "reason": "healthy"}]}}}
+{"checks": {"target-1": "ok", "target-2": "ok"}, "completed_at": "2026-10-12T20:18:13.362779+00:00", "delivery_ok": true, "schema": 1, "status": "ok", "targets": {}}
