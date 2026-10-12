@@ -1,0 +1,157 @@
+import copy
+import json
+import os
+import unittest
+from unittest.mock import patch
+
+import monitor
+
+T0 = '2026-10-12T00:00:00+00:00'
+T1 = '2026-10-12T00:05:00+00:00'
+T2 = '2026-10-12T00:10:00+00:00'
+
+
+class MonitorTests(unittest.TestCase):
+    def test_health_requires_exact_http_200_and_json_status(self):
+        class Response:
+            def __init__(self, status, payload):
+                self.status = status
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, limit):
+                return json.dumps(self.payload).encode()
+        for status, payload, healthy in [
+            (200, {'status': 'ok'}, True),
+            (201, {'status': 'ok'}, False),
+            (202, {'status': 'ok'}, False),
+            (204, {'status': 'ok'}, False),
+            (200, {'status': 'error'}, False),
+        ]:
+            with self.subTest(status=status, payload=payload), patch.object(
+                monitor.urllib.request, 'urlopen', return_value=Response(status, payload)):
+                self.assertEqual(monitor.health('https://example.com/health') is None, healthy)
+
+    def test_slow_russian_checks_leave_time_for_durable_state(self):
+        clock = [100.0]
+        saved = []
+        nodes = ['ru-a', 'ru-b']
+        class Response:
+            status = 200
+            def __init__(self, payload): self.payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, limit): return json.dumps(self.payload).encode()
+        def urlopen(req, timeout):
+            clock[0] += timeout
+            if 'check-http?' in req.full_url:
+                return Response({'ok': 1, 'request_id': 'id', 'nodes': dict.fromkeys(nodes)})
+            if 'check-result/' in req.full_url:
+                return Response(dict.fromkeys(nodes))
+            return Response({'status': 'ok'})
+        class FakeStore:
+            def __init__(self, test): pass
+            def load(self, bootstrap): return {'schema': 1, 'targets': {}}
+            def save(self, state):
+                self.assert_budget = clock[0] + 1 < monitor.DEADLINE
+                if not self.assert_budget: raise TimeoutError('state budget exhausted')
+                clock[0] += 1
+                saved.append(copy.deepcopy(state))
+        env = {'MONITOR_MODE': 'check', 'MONITOR_TARGETS': json.dumps([
+            {'label': 'One', 'url': 'https://example.com/health'},
+            {'label': 'Two', 'url': 'https://example.org/health'}])}
+        with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
+            monitor, 'russian_nodes', return_value=nodes), patch.object(monitor, 'peer', return_value=None), patch.object(
+            monitor.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(
+            monitor.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), patch.object(
+            monitor.urllib.request, 'urlopen', side_effect=urlopen):
+            self.assertEqual(monitor.run(), 0)
+        self.assertEqual(len(saved[0]['checks']), 5)
+        self.assertTrue(saved[-1]['completed_at'])
+        self.assertLess(clock[0] - 100, 165)
+
+    def test_peer_age_already_counts_two_missed_periods(self):
+        result = monitor.advance({}, 'cloud monitor silent', T0, threshold=1)
+        self.assertEqual(result['pending'][0]['kind'], 'alert')
+    def test_success_resets_consecutive_failures(self):
+        first = monitor.advance({}, 'HTTP 502', T0)
+        healthy = monitor.advance(first, None, T1)
+        second = monitor.advance(healthy, 'HTTP 502', T2)
+        self.assertEqual(second['failures'], 1)
+        self.assertEqual(second['pending'], [])
+        self.assertEqual(second['id'], T2)
+
+    def test_pending_recovery_survives_new_incident(self):
+        failure = monitor.advance(monitor.advance({}, 'HTTP 502', T0), 'HTTP 502', T1)
+        failure['accepted'] = ['telegram']
+        failure['pending'] = []
+        recovery = monitor.advance(failure, None, T2)
+        new = monitor.advance(recovery, 'HTTP 503', '2026-10-12T00:15:00+00:00')
+        self.assertNotEqual(new['id'], failure['id'])
+        self.assertEqual(new['pending'][0]['kind'], 'recovery')
+        self.assertEqual(new['pending'][0]['channels'], ['telegram'])
+
+    def test_only_accepted_channels_receive_recovery(self):
+        failure = monitor.advance({}, 'HTTP 502', T0)
+        failure['accepted'] = ['email']
+        failure['pending'] = []
+        recovery = monitor.advance(failure, None, T1)
+        self.assertEqual(recovery['pending'][0]['channels'], ['email'])
+
+    def test_reminder_respects_last_successful_send(self):
+        old = monitor.advance({}, 'HTTP 502', T0)
+        old.update(accepted=['telegram'], last_send=T0)
+        self.assertFalse(monitor.advance(old, 'HTTP 502', T2)['pending'])
+        new = monitor.advance(old, 'HTTP 502', '2026-10-12T00:31:00+00:00')
+        self.assertEqual(new['pending'][0]['kind'], 'reminder')
+
+    def test_run_persists_and_retries_only_failed_channel(self):
+        state = monitor.advance({}, 'TEST: synthetic HTTP failure', T0)
+        database = {'schema': 1, 'targets': {'target-1': state}}
+        persisted = []
+
+        class FakeStore:
+            def __init__(self, test):
+                assert test
+
+            def load(self, bootstrap):
+                return copy.deepcopy(database)
+
+            def save(self, value):
+                persisted.append(copy.deepcopy(value))
+
+        env = {'MONITOR_MODE': 'test-down', 'MONITOR_TARGETS': json.dumps(
+            [{'label': 'Example', 'url': 'https://example.com/health'}])}
+        with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
+            monitor, 'deliver', side_effect=lambda channel, text: channel == 'telegram') as send:
+            self.assertEqual(monitor.run(), 1)
+        self.assertEqual([call.args[0] for call in send.call_args_list], ['telegram', 'email'])
+        self.assertEqual(persisted[0]['targets']['target-1']['pending'][0]['channels'], ['telegram', 'email'])
+        database = persisted[-1]
+        with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
+            monitor, 'deliver', return_value=True) as send:
+            self.assertEqual(monitor.run(), 0)
+        self.assertEqual([call.args[0] for call in send.call_args_list], ['email'])
+        self.assertTrue(persisted[-1]['delivery_ok'])
+
+    def test_russian_http_pending_and_mixed_are_not_healthy(self):
+        nodes = ['ru-a', 'ru-b']
+        start = {'ok': 1, 'request_id': 'id', 'nodes': dict.fromkeys(nodes)}
+        responses = [start, {'ru-a': [[1, .1, 'OK', '200']], 'ru-b': [[0, .1, 'Bad', '503']]}]
+        with patch.object(monitor, 'request', side_effect=responses):
+            self.assertIn('DEGRADED', monitor.russian_http('https://example.com', nodes))
+        with patch.object(monitor, 'request', side_effect=[start] + [dict.fromkeys(nodes)] * 6), patch.object(monitor.time, 'sleep'):
+            self.assertIn('UNKNOWN', monitor.russian_http('https://example.com', nodes))
+
+    def test_corrupt_state_is_not_overwritten(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'example/monitor', 'GITHUB_TOKEN': 'fake'}):
+            store = monitor.Store()
+        with patch.object(monitor, 'request', return_value={'sha': 'one', 'content': 'e30='}):
+            with self.assertRaisesRegex(ValueError, 'corrupt'):
+                store.load(True)
+
+
+if __name__ == '__main__':
+    unittest.main()

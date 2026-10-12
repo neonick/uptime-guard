@@ -1,0 +1,42 @@
+name: Independent uptime
+on:
+  schedule:
+    - cron: '3-58/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [check, test-down, test-recovery]
+        default: check
+      bootstrap:
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: uptime-monitor
+  cancel-in-progress: false
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check and deliver
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_TARGETS: ${{ secrets.MONITOR_TARGETS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PEER_BUCKET: ${{ secrets.PEER_BUCKET }}
+          PEER_S3_KEY_ID: ${{ secrets.PEER_S3_KEY_ID }}
+          PEER_S3_SECRET: ${{ secrets.PEER_S3_SECRET }}
+          MAIL_KEY_ID: ${{ secrets.MAIL_KEY_ID }}
+          MAIL_SECRET: ${{ secrets.MAIL_SECRET }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MONITOR_MODE: ${{ inputs.mode || 'check' }}
+          MONITOR_BOOTSTRAP: ${{ inputs.bootstrap || 'false' }}
+        run: python3 monitor.py
