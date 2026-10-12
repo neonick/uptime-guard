@@ -11,6 +11,11 @@ on:
       bootstrap:
         type: boolean
         default: false
+      delivery_fault:
+        description: Synthetic runs only; exercise real channel rejection
+        type: choice
+        options: [none, email, all]
+        default: none
 permissions:
   contents: write
 concurrency:
@@ -39,4 +44,5 @@ jobs:
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MONITOR_MODE: ${{ inputs.mode || 'check' }}
           MONITOR_BOOTSTRAP: ${{ inputs.bootstrap || 'false' }}
+          MONITOR_TEST_DELIVERY_FAULT: ${{ inputs.delivery_fault || 'none' }}
         run: python3 monitor.py

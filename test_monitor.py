@@ -12,6 +12,29 @@ T2 = '2026-10-12T00:10:00+00:00'
 
 
 class MonitorTests(unittest.TestCase):
+    def test_live_checks_reject_delivery_fault_before_loading_state(self):
+        with patch.dict(os.environ, {'MONITOR_MODE': 'check', 'MONITOR_TEST_DELIVERY_FAULT': 'all'}), patch.object(
+            monitor, 'Store') as store:
+            with self.assertRaises(ValueError):
+                monitor.run()
+            store.assert_not_called()
+
+    def test_synthetic_fault_requests_reject_channels_without_changing_credentials(self):
+        env = {'MONITOR_MODE': 'test-down', 'MONITOR_TEST_DELIVERY_FAULT': 'all',
+               'TELEGRAM_BOT_TOKEN': 'original-token', 'TELEGRAM_CHAT_ID': 'operator', 'MAIL_FROM': 'sender@example.com',
+               'MAIL_TO': 'operator@example.com', 'MAIL_KEY_ID': 'key', 'MAIL_SECRET': 'secret'}
+        calls = []
+        def rejected(url, **kwargs):
+            calls.append((url, kwargs))
+            raise monitor.urllib.error.HTTPError(url, 400, 'rejected', {}, None)
+        with patch.dict(os.environ, env), patch.object(monitor, 'request', side_effect=rejected):
+            self.assertFalse(monitor.deliver('telegram', 'test'))
+            self.assertFalse(monitor.deliver('email', 'test'))
+            self.assertEqual(os.environ['TELEGRAM_BOT_TOKEN'], 'original-token')
+            self.assertEqual(os.environ['MAIL_TO'], 'operator@example.com')
+        self.assertNotIn('original-token', calls[0][0])
+        self.assertEqual(calls[1][1]['body']['Destination']['ToAddresses'], ['not-an-email'])
+
     def test_health_requires_exact_http_200_and_json_status(self):
         class Response:
             def __init__(self, status, payload):

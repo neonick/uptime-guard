@@ -107,6 +107,7 @@ def russian_nodes() -> list[str]:
             result.append(name)
             asns.add(meta.get('asn'))
         if len(result) == 2:
+            print('Russian probes:', [(node, doc['nodes'][node].get('asn')) for node in result])
             return result
     raise ValueError('fewer than two Russian providers')
 
@@ -162,13 +163,17 @@ def peer() -> str | None:
 
 def deliver(channel: str, text: str) -> bool:
     try:
+        fault = os.environ.get('MONITOR_TEST_DELIVERY_FAULT', 'none') if os.environ.get(
+            'MONITOR_MODE') in {'test-down', 'test-recovery'} else 'none'
         if channel == 'telegram':
-            result = request('https://api.telegram.org/bot' + os.environ['TELEGRAM_BOT_TOKEN'] +
+            token = '0:synthetic-invalid-token' if fault == 'all' else os.environ['TELEGRAM_BOT_TOKEN']
+            result = request('https://api.telegram.org/bot' + token +
                 '/sendMessage', body={'chat_id': os.environ['TELEGRAM_CHAT_ID'],
                 'text': text, 'disable_web_page_preview': True})
             return isinstance(result, dict) and result.get('ok') is True
         body = {'FromEmailAddress': os.environ['MAIL_FROM'],
-            'Destination': {'ToAddresses': [os.environ['MAIL_TO']]},
+            'Destination': {'ToAddresses': ['not-an-email' if fault in {'email', 'all'}
+                                          else os.environ['MAIL_TO']]},
             'Content': {'Simple': {'Subject': {'Data': text.splitlines()[0], 'Charset': 'UTF-8'},
                                   'Body': {'Text': {'Data': text, 'Charset': 'UTF-8'}}}}}
         url = 'https://postbox.cloud.yandex.net/v2/email/outbound-emails'
@@ -210,6 +215,9 @@ def run() -> int:
     mode = os.environ.get('MONITOR_MODE', 'check')
     if mode not in {'check', 'test-down', 'test-recovery'}:
         raise ValueError('invalid mode')
+    fault = os.environ.get('MONITOR_TEST_DELIVERY_FAULT', 'none')
+    if fault not in {'none', 'email', 'all'} or (mode == 'check' and fault != 'none'):
+        raise ValueError('delivery faults require a synthetic run')
     test = mode != 'check'
     store = Store(test)
     state = store.load(os.environ.get('MONITOR_BOOTSTRAP') == 'true')
