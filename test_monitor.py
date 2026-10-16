@@ -280,6 +280,14 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(database['targets']['target-1-ru']['failures'], 1)
             self.assertFalse(database['targets']['target-1-ru']['pending'])
 
+    def test_legacy_pending_recovery_is_preserved_during_provider_migration(self):
+        recovery = {'pending': [{'kind': 'recovery', 'id': T0, 'at': T1,
+                                 'channels': ['email'], 'reason': 'healthy'}]}
+        state = {'checks': {'target-1-ru': 'UNKNOWN: Russian HTTP HTTP 429'},
+                 'targets': {'target-1-ru': recovery}}
+        monitor.migrate_checker(state, 'UNKNOWN: Russian HTTP HTTP 429')
+        self.assertEqual(state['targets']['target-1-ru'], recovery)
+
 
 if __name__ == '__main__':
     unittest.main()

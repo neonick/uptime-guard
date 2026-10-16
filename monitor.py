@@ -234,7 +234,8 @@ def migrate_checker(state: dict, failure: str | None) -> None:
                                     if e.get('kind') != 'recovery'), '')
         if key.endswith('-ru') and previous_reason and previous_reason != 'ok' and not previous_reason.startswith('UNKNOWN:'):
             value.setdefault('last_failure', previous_reason)
-        if key.endswith('-ru') and not value.get('last_failure') and previous_reason.startswith('UNKNOWN:'):
+        if (key.endswith('-ru') and value.get('failures') and value.get('id')
+                and not value.get('last_failure') and previous_reason.startswith('UNKNOWN:')):
             legacy.append(value)
             del state['targets'][key]
     if not legacy:
