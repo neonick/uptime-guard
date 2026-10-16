@@ -13,6 +13,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+from notifications import format_notification, notification_batches
+
 DEADLINE = 0.0
 
 
@@ -156,7 +158,8 @@ def peer() -> str | None:
         age = (datetime.now(timezone.utc) - completed).total_seconds()
         if not completed.tzinfo or age < -60:
             return 'UNKNOWN: invalid cloud completion timestamp'
-        return None if age <= 690 else 'cloud monitor silent (over 690 seconds)'
+        return None if age <= 690 else (
+            f'cloud monitor silent (over 690 seconds; last completion {completed.isoformat()})')
     except Exception as exc:
         return 'UNKNOWN: cloud heartbeat ' + reason(exc)
 
@@ -185,28 +188,68 @@ def deliver(channel: str, text: str) -> bool:
         return False
 
 
-def advance(old: dict, failure: str | None, at: str, threshold: int = 2) -> dict:
+def advance(old: dict, failure: str | None, at: str, threshold: int = 2,
+            *, advisory: bool = False) -> dict:
     pending = [dict(event, channels=list(event['channels'])) for event in old.get('pending', [])]
     if failure is None:
+        # A single report after hours of silence does not restore a schedule.
+        # Require four timely observations before closing an advisory incident.
+        if advisory and old.get('accepted'):
+            previous_good = old.get('healthy_at')
+            timely = previous_good and 0 < (datetime.fromisoformat(at) -
+                datetime.fromisoformat(previous_good)).total_seconds() <= 690
+            count = old.get('healthy_count', 0) + 1 if timely else 1
+            since_good = (old.get('healthy_since') if timely else None) or at
+            span = (datetime.fromisoformat(at) - datetime.fromisoformat(since_good)).total_seconds()
+            if count < 4 or span < 690:
+                return {**old, 'healthy_count': count, 'healthy_at': at, 'healthy_since': since_good,
+                        'pending': [event for event in pending if event['kind'] == 'recovery']}
         pending = [event for event in pending if event['kind'] == 'recovery']
         if old.get('accepted'):
             pending.append({'kind': 'recovery', 'id': old['id'], 'at': at,
                             'channels': list(old['accepted']), 'reason': 'healthy'})
         return {'pending': pending}
-    value = {key: old[key] for key in ('id', 'since', 'failures', 'accepted', 'last_send') if key in old}
+    value = {key: old[key] for key in ('id', 'since', 'failures', 'accepted', 'last_send', 'last_failure') if key in old}
     value.setdefault('id', at)
     value.setdefault('since', at)
     value.setdefault('accepted', [])
     value['failures'] = value.get('failures', 0) + 1
     value['pending'] = pending
-    reminder_due = value.get('last_send') and (
-        datetime.fromisoformat(at) - datetime.fromisoformat(value['last_send'])).total_seconds() >= 1800
-    kind = 'reminder' if value['accepted'] else 'alert'
-    if value['failures'] >= threshold and (not value['accepted'] or reminder_due) and not any(
-        event['kind'] == kind and event['id'] == value['id'] for event in pending):
-        pending.append({'kind': kind, 'id': value['id'], 'at': at,
+    # One alert and one recovery per incident. Retry unacknowledged channels,
+    # but never repeat an accepted alert just because time has passed.
+    if value['failures'] >= threshold and not value['accepted'] and not any(
+        event['kind'] == 'alert' and event['id'] == value['id'] for event in pending):
+        pending.append({'kind': 'alert', 'id': value['id'], 'at': at,
                         'channels': ['telegram', 'email'], 'reason': failure})
     return value
+
+
+def migrate_checker(state: dict, failure: str | None) -> None:
+    """Merge legacy per-site API outages without losing channel acknowledgements."""
+    legacy = []
+    for key, value in list(state['targets'].items()):
+        previous_reason = state.get('checks', {}).get(key, '')
+        if not previous_reason:
+            previous_reason = next((e.get('reason', '') for e in value.get('pending', [])
+                                    if e.get('kind') != 'recovery'), '')
+        if key.endswith('-ru') and previous_reason and previous_reason != 'ok' and not previous_reason.startswith('UNKNOWN:'):
+            value.setdefault('last_failure', previous_reason)
+        if key.endswith('-ru') and not value.get('last_failure') and previous_reason.startswith('UNKNOWN:'):
+            legacy.append(value)
+            del state['targets'][key]
+    if not legacy:
+        return
+    merged = dict(state['targets'].get('ru-checker') or min(legacy, key=lambda v: v.get('since', '')))
+    all_values = [merged, *legacy]
+    accepted = list(dict.fromkeys(c for v in all_values for c in v.get('accepted', [])))
+    merged['accepted'] = accepted
+    merged['pending'] = []
+    missing = list(dict.fromkeys(c for v in all_values for e in v.get('pending', [])
+                                for c in e['channels'] if c not in accepted))
+    if missing and failure:
+        merged['pending'].append({'kind': 'alert', 'id': merged['id'],
+            'at': merged.get('since', merged['id']), 'channels': missing, 'reason': failure})
+    state['targets']['ru-checker'] = merged
 
 
 def run() -> int:
@@ -248,7 +291,7 @@ def run() -> int:
                 checks[key + '-ru'] = 'UNKNOWN: Russian HTTP ' + reason(exc)
         finally:
             DEADLINE = run_deadline
-        labels[key + '-ru'] = target['label'] + ' (Russian HTTP, without JSON validation)'
+        labels[key + '-ru'] = target['label']
     if not test:
         DEADLINE = min(run_deadline, time.monotonic() + observation_share)
         try:
@@ -256,26 +299,42 @@ def run() -> int:
         finally:
             DEADLINE = run_deadline
     at = datetime.now(timezone.utc).isoformat()
-    state['checks'] = {key: value or 'ok' for key, value in checks.items()}
+    # Keep raw per-target observations, but track a provider outage only once.
+    raw_checks = {key: value or 'ok' for key, value in checks.items()}
+    unknown_ru = [key for key, failure in checks.items()
+                  if key.endswith('-ru') and failure and failure.startswith('UNKNOWN:')]
+    shared_failure = checks[unknown_ru[0]] if unknown_ru else None
+    checks['ru-checker'] = shared_failure
+    labels['ru-checker'] = 'Проверка из России'
+    for key in unknown_ru:
+        # Do not erase a previously confirmed regional failure with UNKNOWN.
+        checks[key] = (state['targets'].get(key, {}).get('last_failure') or None)
+    migrate_checker(state, shared_failure)
+    state['checks'] = raw_checks
     for key, failure in checks.items():
+        if key in unknown_ru:
+            continue  # UNKNOWN neither advances nor recovers a confirmed regional incident.
         state['targets'][key] = advance(state['targets'].get(key, {}), failure, at,
-                                         threshold=1 if key == 'peer' else 2)
+                                         threshold=1 if key == 'peer' else 2,
+                                         advisory=key in {'peer', 'ru-checker'} or key.endswith('-ru'))
+        if failure and key.endswith('-ru') and not failure.startswith('UNKNOWN:'):
+            state['targets'][key]['last_failure'] = failure
     state['completed_at'] = at
     state['status'] = 'ok'  # Completed observations, not a claim that targets are healthy.
     state['delivery_ok'] = False
     store.save(state)  # Durable pending before delivery; no false heartbeat on aborted checks.
-    for key, value in state['targets'].items():
-        for event in value.get('pending', []):
-            text = ('[TEST] ' if test else '') + '[Independent monitor] ' + labels.get(key, key) + '\n'
-            text += event['kind'] + ': ' + event['reason'] + '\nUTC: ' + event['at'] + '\nEvent: ' + event['id']
-            for channel in event['channels'][:]:
-                if deliver(channel, text):
-                    event['channels'].remove(channel)
-                    if event['kind'] != 'recovery' and event['id'] == value.get('id'):
-                        value['last_send'] = at
-                        if channel not in value['accepted']:
-                            value['accepted'].append(channel)
-                    store.save(state)
+    for channel, events in notification_batches(state['targets']):
+        text = format_notification(events, labels, state['checks'], test=test)
+        if deliver(channel, text):
+            for key, event in events:
+                value = state['targets'][key]
+                event['channels'].remove(channel)
+                if event['kind'] != 'recovery' and event['id'] == value.get('id'):
+                    value['last_send'] = at
+                    if channel not in value['accepted']:
+                        value['accepted'].append(channel)
+            store.save(state)
+    for value in state['targets'].values():
         value['pending'] = [event for event in value.get('pending', []) if event['channels']]
     state['targets'] = {key: value for key, value in state['targets'].items()
                         if value.get('pending') or value.get('failures')}
