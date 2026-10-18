@@ -190,10 +190,10 @@ def deliver(channel: str, text: str) -> bool:
 
 def advance(old: dict, failure: str | None, at: str, threshold: int = 2,
             *, advisory: bool = False) -> dict:
-    pending = [dict(event, channels=list(event['channels'])) for event in old.get('pending', [])]
+    pending = [dict(event, channels=list(event['channels'])) for event in old.get('pending', [])
+               if event['kind'] != 'recovery']
     if failure is None:
-        # A single report after hours of silence does not restore a schedule.
-        # Require four timely observations before closing an advisory incident.
+        # Require sustained regional success before allowing a new regional incident.
         if advisory and old.get('accepted'):
             previous_good = old.get('healthy_at')
             timely = previous_good and 0 < (datetime.fromisoformat(at) -
@@ -203,12 +203,8 @@ def advance(old: dict, failure: str | None, at: str, threshold: int = 2,
             span = (datetime.fromisoformat(at) - datetime.fromisoformat(since_good)).total_seconds()
             if count < 4 or span < 690:
                 return {**old, 'healthy_count': count, 'healthy_at': at, 'healthy_since': since_good,
-                        'pending': [event for event in pending if event['kind'] == 'recovery']}
-        pending = [event for event in pending if event['kind'] == 'recovery']
-        if old.get('accepted'):
-            pending.append({'kind': 'recovery', 'id': old['id'], 'at': at,
-                            'channels': list(old['accepted']), 'reason': 'healthy'})
-        return {'pending': pending}
+                        'pending': []}
+        return {'pending': []}
     value = {key: old[key] for key in ('id', 'since', 'failures', 'accepted', 'last_send', 'last_failure') if key in old}
     value.setdefault('id', at)
     value.setdefault('since', at)
@@ -265,6 +261,9 @@ def run() -> int:
     test = mode != 'check'
     store = Store(test)
     state = store.load(os.environ.get('MONITOR_BOOTSTRAP') == 'true')
+    for value in state['targets'].values():
+        value['pending'] = [event for event in value.get('pending', [])
+                            if event['kind'] != 'recovery']
     targets = json.loads(os.environ['MONITOR_TARGETS'])
     if not isinstance(targets, list) or not targets:
         raise ValueError('empty targets')
@@ -313,11 +312,14 @@ def run() -> int:
     migrate_checker(state, shared_failure)
     state['checks'] = raw_checks
     for key, failure in checks.items():
+        if key in {'peer', 'ru-checker'}:
+            # Observer outages remain in raw checks, never in the delivery queue.
+            state['targets'].pop(key, None)
+            continue
         if key in unknown_ru:
             continue  # UNKNOWN neither advances nor recovers a confirmed regional incident.
         state['targets'][key] = advance(state['targets'].get(key, {}), failure, at,
-                                         threshold=1 if key == 'peer' else 2,
-                                         advisory=key in {'peer', 'ru-checker'} or key.endswith('-ru'))
+                                         advisory=key.endswith('-ru'))
         if failure and key.endswith('-ru') and not failure.startswith('UNKNOWN:'):
             state['targets'][key]['last_failure'] = failure
     state['completed_at'] = at

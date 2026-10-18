@@ -106,22 +106,16 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(second['pending'], [])
         self.assertEqual(second['id'], T2)
 
-    def test_pending_recovery_survives_new_incident(self):
-        failure = monitor.advance(monitor.advance({}, 'HTTP 502', T0), 'HTTP 502', T1)
-        failure['accepted'] = ['telegram']
-        failure['pending'] = []
-        recovery = monitor.advance(failure, None, T2)
-        new = monitor.advance(recovery, 'HTTP 503', '2026-10-12T00:15:00+00:00')
-        self.assertNotEqual(new['id'], failure['id'])
-        self.assertEqual(new['pending'][0]['kind'], 'recovery')
-        self.assertEqual(new['pending'][0]['channels'], ['telegram'])
+    def test_legacy_recovery_is_discarded_before_new_incident(self):
+        old = {'pending': [{'kind': 'recovery', 'channels': ['email']}]}
+        new = monitor.advance(old, 'HTTP 503', T1)
+        self.assertEqual(new['pending'], [])
+        self.assertEqual(new['failures'], 1)
 
-    def test_only_accepted_channels_receive_recovery(self):
-        failure = monitor.advance({}, 'HTTP 502', T0)
-        failure['accepted'] = ['email']
-        failure['pending'] = []
-        recovery = monitor.advance(failure, None, T1)
-        self.assertEqual(recovery['pending'][0]['channels'], ['email'])
+    def test_recovery_is_silent_even_for_accepted_channels(self):
+        old = monitor.advance({}, 'HTTP 502', T0)
+        old['accepted'] = ['email']
+        self.assertEqual(monitor.advance(old, None, T1), {'pending': []})
 
     def test_reminder_respects_last_successful_send(self):
         old = monitor.advance({}, 'HTTP 502', T0)
@@ -175,54 +169,6 @@ class MonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'corrupt'):
                 store.load(True)
 
-    def test_grouped_checker_notice_retries_email_without_duplicating_telegram(self):
-        failure = 'UNKNOWN: Russian HTTP HTTP 429'
-        database = {'schema': 1, 'checks': {key: failure for key in ('target-1-ru', 'target-2-ru')},
-                    'targets': {key: monitor.advance({}, failure, T0)
-                                for key in ('target-1-ru', 'target-2-ru')}}
-        persisted = []
-
-        class FakeStore:
-            def __init__(self, test):
-                assert not test
-
-            def load(self, bootstrap):
-                return copy.deepcopy(database)
-
-            def save(self, value):
-                persisted.append(copy.deepcopy(value))
-
-        env = {'MONITOR_MODE': 'check', 'MONITOR_TEST_DELIVERY_FAULT': 'none',
-               'MONITOR_TARGETS': json.dumps([
-                   {'label': 'Alpha', 'url': 'https://example.com/health'},
-                   {'label': 'Beta', 'url': 'https://example.org/health'}])}
-        rejected = monitor.urllib.error.HTTPError(
-            'https://check-host.net/check-http?host=private-target.example', 429, 'limited', {}, None)
-        with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
-            monitor, 'russian_nodes', return_value=['ru-a', 'ru-b']), patch.object(
-            monitor, 'health', return_value=None), patch.object(monitor, 'peer', return_value=None), patch.object(
-            monitor, 'russian_http', side_effect=rejected), patch.object(
-            monitor, 'deliver', side_effect=lambda channel, text: channel == 'telegram') as send:
-            self.assertEqual(monitor.run(), 1)
-        self.assertEqual([call.args[0] for call in send.call_args_list], ['telegram', 'email'])
-        for call in send.call_args_list:
-            self.assertIn('Прямая проверка Alpha', call.args[1])
-            self.assertIn('Прямая проверка Beta', call.args[1])
-            self.assertNotIn('private-target.example', call.args[1])
-        for key in ('ru-checker',):
-            self.assertEqual(persisted[0]['targets'][key]['pending'][0]['channels'], ['telegram', 'email'])
-            self.assertEqual(persisted[-1]['targets'][key]['pending'][0]['channels'], ['email'])
-        database = persisted[-1]
-        with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
-            monitor, 'russian_nodes', return_value=['ru-a', 'ru-b']), patch.object(
-            monitor, 'health', return_value=None), patch.object(monitor, 'peer', return_value=None), patch.object(
-            monitor, 'russian_http', side_effect=rejected), patch.object(
-            monitor, 'deliver', return_value=True) as send:
-            self.assertEqual(monitor.run(), 0)
-        self.assertEqual([call.args[0] for call in send.call_args_list], ['email'])
-        self.assertTrue(persisted[-1]['delivery_ok'])
-        self.assertFalse(any(value.get('pending') for value in persisted[-1]['targets'].values()))
-
     def test_advisory_needs_four_timely_good_observations(self):
         old = monitor.advance({}, 'cloud monitor silent', T0, threshold=1)
         old.update(accepted=['telegram'], pending=[])
@@ -233,7 +179,7 @@ class MonitorTests(unittest.TestCase):
         third = monitor.advance(second, None, '2026-10-12T00:15:00+00:00', advisory=True)
         self.assertEqual(third['pending'], [])
         good = monitor.advance(third, None, '2026-10-12T00:20:00+00:00', advisory=True)
-        self.assertEqual(good['pending'][0]['kind'], 'recovery')
+        self.assertEqual(good, {'pending': []})
         # Sparse successes never close the same incident or emit another alert.
         sparse = old
         for hour in range(1, 5):
