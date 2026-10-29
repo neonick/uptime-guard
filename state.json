@@ -1,1 +1,1 @@
-{"checks": {"peer": "ok", "target-1": "ok", "target-1-ru": "ok", "target-2": "ok", "target-2-ru": "ok"}, "completed_at": "2026-10-29T22:26:40.636426+00:00", "delivery_ok": true, "schema": 1, "status": "ok", "targets": {}}
+{"checks": {"peer": "ok", "target-1": "ok", "target-1-ru": "UNKNOWN: Russian probes HTTP 403", "target-2": "ok", "target-2-ru": "UNKNOWN: Russian probes HTTP 403"}, "completed_at": "2026-10-29T22:31:31.822144+00:00", "delivery_ok": false, "schema": 1, "status": "ok", "targets": {"target-1": {"pending": []}, "target-2": {"pending": []}}}
