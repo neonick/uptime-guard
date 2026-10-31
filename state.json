@@ -1,1 +1,1 @@
-{"checks": {"peer": "ok", "target-1": "ok", "target-1-ru": "ok", "target-2": "ok", "target-2-ru": "ok"}, "completed_at": "2026-10-31T07:26:32.988018+00:00", "delivery_ok": false, "schema": 1, "status": "ok", "targets": {"target-1": {"pending": []}, "target-1-ru": {"pending": []}, "target-2": {"pending": []}, "target-2-ru": {"pending": []}}}
+{"checks": {"peer": "ok", "target-1": "ok", "target-1-ru": "ok", "target-2": "ok", "target-2-ru": "ok"}, "completed_at": "2026-10-31T07:26:32.988018+00:00", "delivery_ok": true, "schema": 1, "status": "ok", "targets": {}}
