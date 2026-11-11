@@ -148,22 +148,6 @@ def health(url: str) -> str | None:
         return reason(exc)
 
 
-def peer() -> str | None:
-    try:
-        url = 'https://storage.yandexcloud.net/' + urllib.parse.quote(
-            os.environ['PEER_BUCKET']) + '/heartbeat-uptime-state.json'
-        data = request(url, headers=signed_headers(url, os.environ['PEER_S3_KEY_ID'],
-            os.environ['PEER_S3_SECRET'], service='s3'))
-        completed = datetime.fromisoformat(data['completed_at'].replace('Z', '+00:00'))
-        age = (datetime.now(timezone.utc) - completed).total_seconds()
-        if not completed.tzinfo or age < -60:
-            return 'UNKNOWN: invalid cloud completion timestamp'
-        return None if age <= 690 else (
-            f'cloud monitor silent (over 690 seconds; last completion {completed.isoformat()})')
-    except Exception as exc:
-        return 'UNKNOWN: cloud heartbeat ' + reason(exc)
-
-
 def deliver(channel: str, text: str) -> bool:
     try:
         fault = os.environ.get('MONITOR_TEST_DELIVERY_FAULT', 'none') if os.environ.get(
@@ -261,6 +245,7 @@ def run() -> int:
     test = mode != 'check'
     store = Store(test)
     state = store.load(os.environ.get('MONITOR_BOOTSTRAP') == 'true')
+    state['targets'].pop('peer', None)
     for value in state['targets'].values():
         value['pending'] = [event for event in value.get('pending', [])
                             if event['kind'] != 'recovery']
@@ -268,8 +253,8 @@ def run() -> int:
     if not isinstance(targets, list) or not targets:
         raise ValueError('empty targets')
     run_deadline = DEADLINE
-    observation_share = 80 / (len(targets) + 1)
-    labels = {'peer': 'Cloud monitor'}
+    observation_share = 80 / len(targets)
+    labels = {}
     checks = {}
     try:
         nodes = russian_nodes() if not test else []
@@ -292,12 +277,6 @@ def run() -> int:
         finally:
             DEADLINE = run_deadline
         labels[key + '-ru'] = target['label']
-    if not test:
-        DEADLINE = min(run_deadline, time.monotonic() + observation_share)
-        try:
-            checks['peer'] = peer()
-        finally:
-            DEADLINE = run_deadline
     at = datetime.now(timezone.utc).isoformat()
     # Keep raw per-target observations, but track a provider outage only once.
     raw_checks = {key: value or 'ok' for key, value in checks.items()}
@@ -312,7 +291,7 @@ def run() -> int:
     migrate_checker(state, shared_failure)
     state['checks'] = raw_checks
     for key, failure in checks.items():
-        if key in {'peer', 'ru-checker'}:
+        if key == 'ru-checker':
             # Observer outages remain in raw checks, never in the delivery queue.
             state['targets'].pop(key, None)
             continue
