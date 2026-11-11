@@ -86,18 +86,15 @@ class MonitorTests(unittest.TestCase):
             {'label': 'One', 'url': 'https://example.com/health'},
             {'label': 'Two', 'url': 'https://example.org/health'}])}
         with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
-            monitor, 'russian_nodes', return_value=nodes), patch.object(monitor, 'peer', return_value=None), patch.object(
+            monitor, 'russian_nodes', return_value=nodes), patch.object(
             monitor.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(
             monitor.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), patch.object(
             monitor.urllib.request, 'urlopen', side_effect=urlopen):
             self.assertEqual(monitor.run(), 0)
-        self.assertEqual(len(saved[0]['checks']), 5)
+        self.assertEqual(len(saved[0]['checks']), 4)
         self.assertTrue(saved[-1]['completed_at'])
         self.assertLess(clock[0] - 100, 165)
 
-    def test_peer_age_already_counts_two_missed_periods(self):
-        result = monitor.advance({}, 'cloud monitor silent', T0, threshold=1)
-        self.assertEqual(result['pending'][0]['kind'], 'alert')
     def test_success_resets_consecutive_failures(self):
         first = monitor.advance({}, 'HTTP 502', T0)
         healthy = monitor.advance(first, None, T1)
@@ -218,7 +215,7 @@ class MonitorTests(unittest.TestCase):
         for _ in range(3):
             with patch.dict(os.environ, env), patch.object(monitor, 'Store', FakeStore), patch.object(
                 monitor, 'russian_nodes', return_value=[]), patch.object(
-                monitor, 'health', return_value=None), patch.object(monitor, 'peer', return_value=None), patch.object(
+                monitor, 'health', return_value=None), patch.object(
                 monitor, 'russian_http', return_value='UNKNOWN: Russian HTTP HTTP 429'), patch.object(
                 monitor, 'deliver', return_value=True):
                 self.assertEqual(monitor.run(), 0)

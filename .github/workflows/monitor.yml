@@ -33,9 +33,6 @@ jobs:
           MONITOR_TARGETS: ${{ secrets.MONITOR_TARGETS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PEER_BUCKET: ${{ secrets.PEER_BUCKET }}
-          PEER_S3_KEY_ID: ${{ secrets.PEER_S3_KEY_ID }}
-          PEER_S3_SECRET: ${{ secrets.PEER_S3_SECRET }}
           MAIL_KEY_ID: ${{ secrets.MAIL_KEY_ID }}
           MAIL_SECRET: ${{ secrets.MAIL_SECRET }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}

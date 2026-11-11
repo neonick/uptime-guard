@@ -8,8 +8,7 @@ import monitor
 
 
 class ActionableTests(unittest.TestCase):
-    def cycle(self, database, *, site=None, regional='UNKNOWN: Russian probes HTTP 429',
-              peer='cloud monitor silent'):
+    def cycle(self, database, *, site=None, regional='UNKNOWN: Russian probes HTTP 429'):
         saved = []
 
         class FakeStore:
@@ -23,7 +22,7 @@ class ActionableTests(unittest.TestCase):
             monitor, 'health', return_value=site), patch.object(
             monitor, 'russian_nodes', return_value=['ru-a', 'ru-b']), patch.object(
             monitor, 'russian_http', return_value=regional), patch.object(
-            monitor, 'peer', return_value=peer), patch.object(monitor, 'deliver', return_value=True) as send:
+            monitor, 'deliver', return_value=True) as send:
             self.assertEqual(monitor.run(), 0)
         return saved[-1], send
 
@@ -40,9 +39,10 @@ class ActionableTests(unittest.TestCase):
                     state, send = self.cycle(state)
                     send.assert_not_called()
                     self.assertTrue(state['delivery_ok'])
-                    self.assertIn('cloud monitor silent', state['checks']['peer'])
+                    self.assertNotIn('peer', state['checks'])
+                    self.assertNotIn('peer', state['targets'])
                     self.assertIn('UNKNOWN:', state['checks']['target-1-ru'])
-                state, send = self.cycle(state, peer=None, regional=None)
+                state, send = self.cycle(state, regional=None)
                 send.assert_not_called()
 
     def test_real_site_failure_alerts_once_and_recovers_silently(self):
